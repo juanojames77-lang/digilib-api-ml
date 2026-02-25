@@ -4,3 +4,4 @@ pypdf
 scikit-learn
 numpy
 gunicorn
+joblib
