@@ -27,29 +27,48 @@ except Exception as e:
 
 CLUSTER_NAMES = ['BSCS', 'BSED-MATH', 'BSES', 'BSHM', 'BTLED-HE', 'BEED']
 
-# ========== TOPIC EXTRACTION FUNCTION ==========
+# ========== ENHANCED TOPIC EXTRACTION FUNCTION ==========
 def extract_topics(text, num_topics=8):
     """
     Extract main topics/keywords from text using TF-IDF
-    No training required - works on the fly!
+    FIXED: Removes numbers, captures phrases, better filtering
     """
     try:
-        # Clean text
+        # Clean text - remove special characters but keep words
         text = re.sub(r'[^\w\s]', ' ', text.lower())
         text = re.sub(r'\s+', ' ', text)
+        
+        # Remove standalone numbers (like "2024", "123") but keep words with numbers (like "python3")
+        text = re.sub(r'\b\d+\b', '', text)
         
         # If text is too short, return basic topics
         words = text.split()
         if len(words) < 10:
             return [{"topic": "general", "score": 0.5}]
         
-        # Create TF-IDF vectorizer (no training needed)
+        # Expanded academic stop words list
+        academic_stop_words = [
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
+            'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had',
+            'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can',
+            'their', 'they', 'them', 'our', 'we', 'you', 'your', 'my', 'his', 'her',
+            'study', 'research', 'thesis', 'paper', 'document', 'analysis',
+            'chapter', 'section', 'figure', 'table', 'equation', 'result',
+            'method', 'methodology', 'approach', 'conclusion', 'discussion',
+            'introduction', 'background', 'literature', 'review', 'objective',
+            'purpose', 'data', 'findings', 'based', 'used', 'using', 'also',
+            'within', 'between', 'among', 'since', 'until', 'during', 'while'
+        ]
+        
+        # Create TF-IDF vectorizer with improved settings
         tfidf = TfidfVectorizer(
-            max_features=20,
-            stop_words='english',
-            ngram_range=(1, 2),  # Capture phrases like "machine learning"
+            max_features=30,  # Increased to catch more topics
+            stop_words=academic_stop_words,
+            ngram_range=(1, 3),  # Capture up to 3-word phrases
             min_df=1,
-            max_df=1.0
+            max_df=1.0,
+            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'  # Only words with letters (no numbers)
         )
         
         # Transform text - this computes TF-IDF on the fly
@@ -65,32 +84,78 @@ def extract_topics(text, num_topics=8):
         topics = []
         for idx in top_indices:
             if scores[idx] > 0.1:  # Only include meaningful scores
-                topics.append({
-                    "topic": feature_names[idx],
-                    "score": float(scores[idx])
-                })
+                topic_name = feature_names[idx]
+                # Filter out any remaining number-like strings
+                if not topic_name.replace('-', '').replace('_', '').isdigit():
+                    # Capitalize first letter of each word for better display
+                    formatted_topic = ' '.join(word.capitalize() for word in topic_name.split())
+                    topics.append({
+                        "topic": formatted_topic,
+                        "score": float(scores[idx])
+                    })
         
-        return topics
+        # If we got topics, return them
+        if len(topics) >= 3:
+            return topics
+        
+        # Otherwise try with more permissive settings (single words)
+        return fallback_topics_enhanced(text, num_topics)
         
     except Exception as e:
         print(f"❌ Topic extraction error: {e}")
-        # Fallback: simple word frequency
-        return fallback_topics(text, num_topics)
+        return fallback_topics_enhanced(text, num_topics)
 
+def fallback_topics_enhanced(text, num_topics=5):
+    """Enhanced fallback with better filtering"""
+    words = text.lower().split()
+    
+    # Academic/technical words to exclude
+    exclude_words = {'study', 'research', 'paper', 'thesis', 'analysis', 'method', 
+                     'result', 'conclusion', 'figure', 'table', 'chapter', 'section',
+                     'introduction', 'background', 'review', 'objective', 'purpose',
+                     'data', 'findings', 'based', 'used', 'using'}
+    
+    # Common stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
+                  'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had'}
+    
+    # Count word frequencies (3+ letter words, excluding stop/exclude words)
+    word_counts = {}
+    for word in words:
+        if (len(word) > 3 and 
+            word not in exclude_words and
+            word not in stop_words and
+            not word.isdigit()):
+            word_counts[word] = word_counts.get(word, 0) + 1
+    
+    # Sort by frequency
+    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    topics = []
+    for word, count in sorted_words[:num_topics]:
+        # Capitalize the word for display
+        formatted_word = word.capitalize()
+        topics.append({
+            "topic": formatted_word,
+            "score": min(0.8, count / 10)  # Normalize score
+        })
+    
+    return topics
+
+# Keep original fallback for backward compatibility
 def fallback_topics(text, num_topics=5):
-    """Simple word frequency as fallback"""
+    """Original fallback - kept for compatibility"""
     words = text.lower().split()
     stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
                   'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
                   'this', 'that', 'these', 'those', 'it', 'its'}
     
-    # Count word frequencies
     word_counts = {}
     for word in words:
         if word not in stop_words and len(word) > 3:
             word_counts[word] = word_counts.get(word, 0) + 1
     
-    # Sort by frequency
     sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
     
     topics = []
@@ -101,6 +166,44 @@ def fallback_topics(text, num_topics=5):
         })
     
     return topics
+
+# ========== OPTIONAL: KeyBERT Topic Extraction (Advanced) ==========
+# Uncomment this if you install keybert: pip install keybert sentence-transformers
+"""
+def extract_topics_keybert(text, num_topics=8):
+    '''Extract topics using KeyBERT (better quality)'''
+    try:
+        from keybert import KeyBERT
+        
+        # Initialize KeyBERT (loads once)
+        if not hasattr(extract_topics_keybert, "kw_model"):
+            extract_topics_keybert.kw_model = KeyBERT()
+        
+        # Extract keywords
+        keywords = extract_topics_keybert.kw_model.extract_keywords(
+            text,
+            keyphrase_ngram_range=(1, 3),
+            stop_words='english',
+            top_n=num_topics
+        )
+        
+        topics = []
+        for keyword, score in keywords:
+            formatted_keyword = ' '.join(word.capitalize() for word in keyword.split())
+            topics.append({
+                "topic": formatted_keyword,
+                "score": float(score)
+            })
+        
+        return topics
+        
+    except ImportError:
+        print("⚠️ KeyBERT not installed, falling back to TF-IDF")
+        return extract_topics(text, num_topics)
+    except Exception as e:
+        print(f"❌ KeyBERT error: {e}")
+        return extract_topics(text, num_topics)
+"""
 
 # ========== EXTRACT TEXT FROM PDF ==========
 def extract_text_from_pdf(pdf_bytes):
@@ -186,10 +289,10 @@ def predict():
             "confidence": 0.5
         })
 
-# ========== NEW: Predict with Topics Endpoint ==========
+# ========== PREDICT WITH TOPICS ENDPOINT (UPDATED) ==========
 @app.route('/predict-with-topics', methods=['POST'])
 def predict_with_topics():
-    """NEW endpoint - returns both course prediction AND extracted topics"""
+    """Returns both course prediction AND extracted topics (fixed version)"""
     try:
         if 'file' not in request.files:
             return jsonify({
@@ -219,7 +322,7 @@ def predict_with_topics():
         
         cluster = max(0, min(5, cluster))
         
-        # 2. Topic extraction (NEW - no training required)
+        # 2. Topic extraction (UPDATED - no numbers, better phrases)
         topics = extract_topics(text, 8)  # Extract up to 8 topics
         
         return jsonify({
@@ -233,6 +336,7 @@ def predict_with_topics():
         })
         
     except Exception as e:
+        print(f"❌ Error in predict-with-topics: {e}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -241,10 +345,10 @@ def predict_with_topics():
             "topics": []
         })
 
-# ========== NEW: Extract Topics Only Endpoint ==========
+# ========== EXTRACT TOPICS ONLY ENDPOINT ==========
 @app.route('/extract-topics', methods=['POST'])
 def extract_topics_only():
-    """NEW endpoint - extract topics without course prediction"""
+    """Extract topics without course prediction"""
     try:
         if 'file' not in request.files:
             return jsonify({"success": False, "error": "No file", "topics": []})
@@ -258,7 +362,7 @@ def extract_topics_only():
         if not text.strip():
             text = "academic research thesis"
         
-        # Extract topics
+        # Extract topics (UPDATED)
         topics = extract_topics(text, 10)
         
         return jsonify({
@@ -301,7 +405,7 @@ def predict_text():
         
         cluster = max(0, min(5, cluster))
         
-        # Topic extraction
+        # Topic extraction (UPDATED)
         topics = extract_topics(text, 8)
         
         return jsonify({
