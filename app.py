@@ -8,11 +8,15 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import io
 import os
 import re
+import time
 
 print("🚀 Starting Digital Library ML API on Render...")
 
 app = Flask(__name__)
 CORS(app)  # Allow your main app to call this API
+
+# Track start time for uptime
+START_TIME = time.time()
 
 # Load ML models
 print("🔍 Loading ML models...")
@@ -143,6 +147,40 @@ def fallback_topics_enhanced(text, num_topics=5):
     
     return topics
 
+# ========== EXTRACT TEXT FROM PDF - UPDATED TO 10 PAGES ==========
+def extract_text_from_pdf(pdf_bytes):
+    """Extract text from PDF bytes - NOW READING 10 PAGES!"""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        text = ""
+        
+        # UPDATED: Read first 10 pages (was 3)
+        pages_to_read = min(10, total_pages)
+        print(f"📄 PDF has {total_pages} pages, reading {pages_to_read} pages")
+        
+        for i in range(pages_to_read):
+            try:
+                page_text = reader.pages[i].extract_text()
+                if page_text and page_text.strip():
+                    text += page_text + " "
+            except Exception as page_err:
+                print(f"⚠️ Error reading page {i+1}: {page_err}")
+                continue
+        
+        # If still no text, try reading as plain text (fallback)
+        if not text.strip():
+            try:
+                text = pdf_bytes.decode('utf-8', errors='ignore')[:5000]
+                print("⚠️ Using fallback text decoding")
+            except:
+                text = ""
+        
+        return text.strip()
+    except Exception as e:
+        print(f"❌ PDF text extraction error: {e}")
+        return ""
+
 # Keep original fallback for backward compatibility
 def fallback_topics(text, num_topics=5):
     """Original fallback - kept for compatibility"""
@@ -167,60 +205,6 @@ def fallback_topics(text, num_topics=5):
     
     return topics
 
-# ========== OPTIONAL: KeyBERT Topic Extraction (Advanced) ==========
-# Uncomment this if you install keybert: pip install keybert sentence-transformers
-"""
-def extract_topics_keybert(text, num_topics=8):
-    '''Extract topics using KeyBERT (better quality)'''
-    try:
-        from keybert import KeyBERT
-        
-        # Initialize KeyBERT (loads once)
-        if not hasattr(extract_topics_keybert, "kw_model"):
-            extract_topics_keybert.kw_model = KeyBERT()
-        
-        # Extract keywords
-        keywords = extract_topics_keybert.kw_model.extract_keywords(
-            text,
-            keyphrase_ngram_range=(1, 3),
-            stop_words='english',
-            top_n=num_topics
-        )
-        
-        topics = []
-        for keyword, score in keywords:
-            formatted_keyword = ' '.join(word.capitalize() for word in keyword.split())
-            topics.append({
-                "topic": formatted_keyword,
-                "score": float(score)
-            })
-        
-        return topics
-        
-    except ImportError:
-        print("⚠️ KeyBERT not installed, falling back to TF-IDF")
-        return extract_topics(text, num_topics)
-    except Exception as e:
-        print(f"❌ KeyBERT error: {e}")
-        return extract_topics(text, num_topics)
-"""
-
-# ========== EXTRACT TEXT FROM PDF ==========
-def extract_text_from_pdf(pdf_bytes):
-    """Extract text from PDF bytes"""
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        text = ""
-        # Read first 3 pages
-        for i in range(min(3, len(reader.pages))):
-            page_text = reader.pages[i].extract_text()
-            if page_text:
-                text += page_text + " "
-        return text.strip()
-    except Exception as e:
-        print(f"❌ PDF text extraction error: {e}")
-        return ""
-
 # ========== ROUTES ==========
 
 @app.route('/')
@@ -229,6 +213,7 @@ def home():
         "message": "Digital Library ML API",
         "status": "running",
         "models_loaded": MODELS_LOADED,
+        "pages_scanned": 10,  # Let users know we now scan 10 pages
         "endpoints": {
             "/predict": "Upload PDF for course prediction",
             "/predict-with-topics": "Upload PDF for course + topic extraction",
@@ -239,9 +224,14 @@ def home():
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "models": MODELS_LOADED})
+    return jsonify({
+        "status": "healthy", 
+        "models": MODELS_LOADED,
+        "uptime": time.time() - START_TIME,
+        "pages_scanned": 10
+    })
 
-# ========== ORIGINAL PREDICT ENDPOINT (unchanged) ==========
+# ========== ORIGINAL PREDICT ENDPOINT ==========
 @app.route('/predict', methods=['POST'])
 def predict():
     """Original endpoint - returns only course prediction"""
@@ -257,7 +247,7 @@ def predict():
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Extract text
+        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
@@ -278,7 +268,8 @@ def predict():
             "success": True,
             "cluster": int(cluster),
             "confidence": float(confidence),
-            "cluster_name": CLUSTER_NAMES[cluster]
+            "cluster_name": CLUSTER_NAMES[cluster],
+            "pages_scanned": min(10, len(PdfReader(io.BytesIO(pdf_bytes)).pages))
         })
         
     except Exception as e:
@@ -292,7 +283,7 @@ def predict():
 # ========== PREDICT WITH TOPICS ENDPOINT (UPDATED) ==========
 @app.route('/predict-with-topics', methods=['POST'])
 def predict_with_topics():
-    """Returns both course prediction AND extracted topics (fixed version)"""
+    """Returns both course prediction AND extracted topics (now scanning 10 pages)"""
     try:
         if 'file' not in request.files:
             return jsonify({
@@ -306,7 +297,11 @@ def predict_with_topics():
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Extract text
+        # Get page count for response
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        
+        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
@@ -322,17 +317,18 @@ def predict_with_topics():
         
         cluster = max(0, min(5, cluster))
         
-        # 2. Topic extraction (UPDATED - no numbers, better phrases)
-        topics = extract_topics(text, 8)  # Extract up to 8 topics
+        # 2. Topic extraction
+        topics = extract_topics(text, 8)
         
         return jsonify({
             "success": True,
             "cluster": int(cluster),
             "confidence": float(confidence),
             "cluster_name": CLUSTER_NAMES[cluster],
-            "topics": topics,  # Array of {topic, score}
+            "topics": topics,
             "text_length": len(text),
-            "pages_analyzed": min(3, len(PdfReader(io.BytesIO(pdf_bytes)).pages))
+            "total_pages": total_pages,
+            "pages_scanned": min(10, total_pages)
         })
         
     except Exception as e:
@@ -356,19 +352,25 @@ def extract_topics_only():
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Extract text
+        # Get page count
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        
+        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
             text = "academic research thesis"
         
-        # Extract topics (UPDATED)
+        # Extract topics
         topics = extract_topics(text, 10)
         
         return jsonify({
             "success": True,
             "topics": topics,
-            "text_length": len(text)
+            "text_length": len(text),
+            "total_pages": total_pages,
+            "pages_scanned": min(10, total_pages)
         })
         
     except Exception as e:
@@ -405,7 +407,7 @@ def predict_text():
         
         cluster = max(0, min(5, cluster))
         
-        # Topic extraction (UPDATED)
+        # Topic extraction
         topics = extract_topics(text, 8)
         
         return jsonify({
@@ -424,6 +426,20 @@ def predict_text():
             "confidence": 0.5,
             "topics": []
         })
+
+# ========== INFO ENDPOINT ==========
+@app.route('/info')
+def info():
+    """Get information about the API configuration"""
+    return jsonify({
+        "name": "DIGILIB ML API",
+        "version": "2.0",
+        "pages_scanned": 10,
+        "clusters": CLUSTER_NAMES,
+        "models_loaded": MODELS_LOADED,
+        "topic_extraction": "TF-IDF with 3-word phrases",
+        "max_topics": 8
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
