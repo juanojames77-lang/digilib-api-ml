@@ -31,27 +31,23 @@ except Exception as e:
 
 CLUSTER_NAMES = ['BSCS', 'BSED-MATH', 'BSES', 'BSHM', 'BTLED-HE', 'BEED']
 
-# ========== ENHANCED TOPIC EXTRACTION FUNCTION ==========
+# ========== IMPROVED TOPIC EXTRACTION ==========
 def extract_topics(text, num_topics=8):
     """
-    Extract main topics/keywords from text using TF-IDF
-    FIXED: Removes numbers, captures phrases, better filtering
+    Improved topic extraction with better filtering and phrase detection
     """
     try:
-        # Clean text - remove special characters but keep words
+        # Clean text
         text = re.sub(r'[^\w\s]', ' ', text.lower())
         text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\b\d+\b', '', text)  # Remove numbers
         
-        # Remove standalone numbers (like "2024", "123") but keep words with numbers (like "python3")
-        text = re.sub(r'\b\d+\b', '', text)
-        
-        # If text is too short, return basic topics
         words = text.split()
-        if len(words) < 10:
-            return [{"topic": "general", "score": 0.5}]
+        if len(words) < 20:
+            return [{"topic": "General", "score": 0.5}]
         
-        # Expanded academic stop words list
-        academic_stop_words = [
+        # Academic stop words - expanded
+        stop_words = [
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
             'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
             'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had',
@@ -62,48 +58,80 @@ def extract_topics(text, num_topics=8):
             'method', 'methodology', 'approach', 'conclusion', 'discussion',
             'introduction', 'background', 'literature', 'review', 'objective',
             'purpose', 'data', 'findings', 'based', 'used', 'using', 'also',
-            'within', 'between', 'among', 'since', 'until', 'during', 'while'
+            'within', 'between', 'among', 'since', 'until', 'during', 'while',
+            'however', 'therefore', 'thus', 'hence', 'furthermore', 'moreover',
+            'consequently', 'additionally', 'alternatively', 'conversely',
+            'significant', 'important', 'necessary', 'potential', 'various',
+            'including', 'regarding', 'according', 'following', 'previous'
         ]
         
-        # Create TF-IDF vectorizer with improved settings
-        tfidf = TfidfVectorizer(
-            max_features=30,  # Increased to catch more topics
-            stop_words=academic_stop_words,
-            ngram_range=(1, 3),  # Capture up to 3-word phrases
+        # Try with multiple n-gram ranges to catch different phrase types
+        topic_sets = []
+        
+        # Try 2-word phrases first (often most meaningful)
+        tfidf_bigram = TfidfVectorizer(
+            max_features=25,
+            stop_words=stop_words,
+            ngram_range=(2, 2),
             min_df=1,
             max_df=1.0,
-            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'  # Only words with letters (no numbers)
+            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'
         )
         
-        # Transform text - this computes TF-IDF on the fly
-        tfidf_matrix = tfidf.fit_transform([text])
+        bigram_matrix = tfidf_bigram.fit_transform([text])
+        bigram_features = tfidf_bigram.get_feature_names_out()
+        bigram_scores = bigram_matrix.toarray()[0]
         
-        # Get feature names and scores
-        feature_names = tfidf.get_feature_names_out()
-        scores = tfidf_matrix.toarray()[0]
+        for idx in bigram_scores.argsort()[-num_topics:][::-1]:
+            if bigram_scores[idx] > 0.2:
+                topic_sets.append({
+                    "topic": ' '.join(w.capitalize() for w in bigram_features[idx].split()),
+                    "score": float(bigram_scores[idx]),
+                    "type": "phrase"
+                })
         
-        # Sort by score and get top topics
-        top_indices = scores.argsort()[-num_topics:][::-1]
+        # Also try single words for completeness
+        tfidf_unigram = TfidfVectorizer(
+            max_features=15,
+            stop_words=stop_words,
+            ngram_range=(1, 1),
+            min_df=1,
+            max_df=1.0,
+            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'
+        )
         
-        topics = []
-        for idx in top_indices:
-            if scores[idx] > 0.1:  # Only include meaningful scores
-                topic_name = feature_names[idx]
-                # Filter out any remaining number-like strings
-                if not topic_name.replace('-', '').replace('_', '').isdigit():
-                    # Capitalize first letter of each word for better display
-                    formatted_topic = ' '.join(word.capitalize() for word in topic_name.split())
-                    topics.append({
-                        "topic": formatted_topic,
-                        "score": float(scores[idx])
-                    })
+        unigram_matrix = tfidf_unigram.fit_transform([text])
+        unigram_features = tfidf_unigram.get_feature_names_out()
+        unigram_scores = unigram_matrix.toarray()[0]
         
-        # If we got topics, return them
-        if len(topics) >= 3:
-            return topics
+        for idx in unigram_scores.argsort()[-int(num_topics/2):][::-1]:
+            if unigram_scores[idx] > 0.15 and len(unigram_features[idx]) > 3:
+                topic_sets.append({
+                    "topic": unigram_features[idx].capitalize(),
+                    "score": float(unigram_scores[idx]),
+                    "type": "word"
+                })
         
-        # Otherwise try with more permissive settings (single words)
-        return fallback_topics_enhanced(text, num_topics)
+        # Sort all topics by score and remove duplicates
+        topic_sets.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Deduplicate (if a word appears as part of a phrase, keep the phrase)
+        final_topics = []
+        seen_words = set()
+        
+        for topic in topic_sets:
+            words_in_topic = set(topic['topic'].lower().split())
+            if not any(words_in_topic.intersection(seen_words)):
+                final_topics.append({
+                    "topic": topic['topic'],
+                    "score": round(topic['score'], 3)
+                })
+                seen_words.update(words_in_topic)
+            
+            if len(final_topics) >= num_topics:
+                break
+        
+        return final_topics if final_topics else fallback_topics_enhanced(text, num_topics)
         
     except Exception as e:
         print(f"❌ Topic extraction error: {e}")
@@ -113,24 +141,16 @@ def fallback_topics_enhanced(text, num_topics=5):
     """Enhanced fallback with better filtering"""
     words = text.lower().split()
     
-    # Academic/technical words to exclude
-    exclude_words = {'study', 'research', 'paper', 'thesis', 'analysis', 'method', 
-                     'result', 'conclusion', 'figure', 'table', 'chapter', 'section',
-                     'introduction', 'background', 'review', 'objective', 'purpose',
-                     'data', 'findings', 'based', 'used', 'using'}
+    # Common words to exclude
+    exclude = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+               'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
+               'study', 'research', 'thesis', 'paper', 'chapter', 'figure', 'table',
+               'analysis', 'method', 'result', 'conclusion', 'discussion'}
     
-    # Common stop words
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
-                  'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had'}
-    
-    # Count word frequencies (3+ letter words, excluding stop/exclude words)
+    # Count word frequencies
     word_counts = {}
     for word in words:
-        if (len(word) > 3 and 
-            word not in exclude_words and
-            word not in stop_words and
-            not word.isdigit()):
+        if word not in exclude and len(word) > 3 and not word.isdigit():
             word_counts[word] = word_counts.get(word, 0) + 1
     
     # Sort by frequency
@@ -138,11 +158,9 @@ def fallback_topics_enhanced(text, num_topics=5):
     
     topics = []
     for word, count in sorted_words[:num_topics]:
-        # Capitalize the word for display
-        formatted_word = word.capitalize()
         topics.append({
-            "topic": formatted_word,
-            "score": min(0.8, count / 10)  # Normalize score
+            "topic": word.capitalize(),
+            "score": round(min(0.8, count / 10), 3)
         })
     
     return topics
