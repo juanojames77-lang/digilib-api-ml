@@ -5,3 +5,5 @@ scikit-learn
 numpy
 gunicorn
 joblib
+sentence-transformers
+keybert

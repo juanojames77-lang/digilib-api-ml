@@ -4,16 +4,19 @@ from pypdf import PdfReader
 import joblib
 import numpy as np
 from sklearn.metrics import pairwise_distances_argmin_min
-from sklearn.feature_extraction.text import TfidfVectorizer
 import io
 import os
 import re
 import time
 
+# KeyBERT imports
+from keybert import KeyBERT
+from sentence_transformers import SentenceTransformer
+
 print("🚀 Starting Digital Library ML API on Render...")
 
 app = Flask(__name__)
-CORS(app)  # Allow your main app to call this API
+CORS(app)
 
 # Track start time for uptime
 START_TIME = time.time()
@@ -29,133 +32,125 @@ except Exception as e:
     print(f"❌ Error loading models: {e}")
     MODELS_LOADED = False
 
+# Initialize KeyBERT model
+print("🔧 Initializing KeyBERT for topic extraction...")
+try:
+    # Use a lightweight but effective model
+    # Options: 'all-MiniLM-L6-v2' (fast), 'all-mpnet-base-v2' (more accurate)
+    kw_model = KeyBERT(model='all-MiniLM-L6-v2')
+    print("✅ KeyBERT initialized successfully!")
+    KEYBERT_LOADED = True
+except Exception as e:
+    print(f"❌ Error initializing KeyBERT: {e}")
+    KEYBERT_LOADED = False
+    kw_model = None
+
 CLUSTER_NAMES = ['BSCS', 'BSED-MATH', 'BSES', 'BSHM', 'BTLED-HE', 'BEED']
 
-# ========== ENHANCED TOPIC EXTRACTION FUNCTION ==========
-def extract_topics(text, num_topics=8):
+# ========== KEYBERT TOPIC EXTRACTION ==========
+def extract_topics_keybert(text, num_topics=8):
     """
-    Extract main topics/keywords from text using TF-IDF
-    FIXED: Removes numbers, captures phrases, better filtering
+    Extract topics using KeyBERT (BERT-based semantic understanding)
+    Much better than TF-IDF for capturing meaningful topics
     """
     try:
-        # Clean text - remove special characters but keep words
+        if not KEYBERT_LOADED or kw_model is None:
+            print("⚠️ KeyBERT not available, falling back to TF-IDF")
+            return extract_topics_tfidf(text, num_topics)
+        
+        # Clean text but preserve meaning
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        if len(text.split()) < 20:
+            return [{"topic": "general", "score": 0.5}]
+        
+        # Extract keywords with diversity to get varied topics
+        # keyphrase_ngram_range=(1, 3) captures 1-3 word phrases like "machine learning"
+        keywords = kw_model.extract_keywords(
+            text,
+            keyphrase_ngram_range=(1, 3),
+            stop_words='english',
+            top_n=num_topics,
+            use_mmr=True,  # Maximal Marginal Relevance for diversity
+            diversity=0.7   # Balance between relevance and diversity
+        )
+        
+        topics = []
+        for keyword, score in keywords:
+            # Capitalize each word for better display
+            formatted_topic = ' '.join(word.capitalize() for word in keyword.split())
+            topics.append({
+                "topic": formatted_topic,
+                "score": float(score)
+            })
+        
+        return topics
+        
+    except Exception as e:
+        print(f"❌ KeyBERT extraction error: {e}")
+        return extract_topics_tfidf(text, num_topics)
+
+# ========== FALLBACK TF-IDF TOPIC EXTRACTION ==========
+def extract_topics_tfidf(text, num_topics=8):
+    """Original TF-IDF based extraction as fallback"""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        # Clean text
         text = re.sub(r'[^\w\s]', ' ', text.lower())
         text = re.sub(r'\s+', ' ', text)
-        
-        # Remove standalone numbers (like "2024", "123") but keep words with numbers (like "python3")
         text = re.sub(r'\b\d+\b', '', text)
         
-        # If text is too short, return basic topics
         words = text.split()
         if len(words) < 10:
             return [{"topic": "general", "score": 0.5}]
         
-        # Expanded academic stop words list
         academic_stop_words = [
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
             'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
             'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had',
-            'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can',
-            'their', 'they', 'them', 'our', 'we', 'you', 'your', 'my', 'his', 'her',
             'study', 'research', 'thesis', 'paper', 'document', 'analysis',
-            'chapter', 'section', 'figure', 'table', 'equation', 'result',
-            'method', 'methodology', 'approach', 'conclusion', 'discussion',
-            'introduction', 'background', 'literature', 'review', 'objective',
-            'purpose', 'data', 'findings', 'based', 'used', 'using', 'also',
-            'within', 'between', 'among', 'since', 'until', 'during', 'while'
+            'chapter', 'section', 'figure', 'table', 'result', 'method'
         ]
         
-        # Create TF-IDF vectorizer with improved settings
         tfidf = TfidfVectorizer(
-            max_features=30,  # Increased to catch more topics
+            max_features=30,
             stop_words=academic_stop_words,
-            ngram_range=(1, 3),  # Capture up to 3-word phrases
-            min_df=1,
-            max_df=1.0,
-            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'  # Only words with letters (no numbers)
+            ngram_range=(1, 2),
+            token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z]+\b'
         )
         
-        # Transform text - this computes TF-IDF on the fly
         tfidf_matrix = tfidf.fit_transform([text])
-        
-        # Get feature names and scores
         feature_names = tfidf.get_feature_names_out()
         scores = tfidf_matrix.toarray()[0]
         
-        # Sort by score and get top topics
         top_indices = scores.argsort()[-num_topics:][::-1]
         
         topics = []
         for idx in top_indices:
-            if scores[idx] > 0.1:  # Only include meaningful scores
+            if scores[idx] > 0.1:
                 topic_name = feature_names[idx]
-                # Filter out any remaining number-like strings
-                if not topic_name.replace('-', '').replace('_', '').isdigit():
-                    # Capitalize first letter of each word for better display
-                    formatted_topic = ' '.join(word.capitalize() for word in topic_name.split())
-                    topics.append({
-                        "topic": formatted_topic,
-                        "score": float(scores[idx])
-                    })
+                formatted_topic = ' '.join(word.capitalize() for word in topic_name.split())
+                topics.append({
+                    "topic": formatted_topic,
+                    "score": float(scores[idx])
+                })
         
-        # If we got topics, return them
-        if len(topics) >= 3:
-            return topics
-        
-        # Otherwise try with more permissive settings (single words)
-        return fallback_topics_enhanced(text, num_topics)
+        return topics
         
     except Exception as e:
-        print(f"❌ Topic extraction error: {e}")
-        return fallback_topics_enhanced(text, num_topics)
+        print(f"❌ TF-IDF extraction error: {e}")
+        return []
 
-def fallback_topics_enhanced(text, num_topics=5):
-    """Enhanced fallback with better filtering"""
-    words = text.lower().split()
-    
-    # Academic/technical words to exclude
-    exclude_words = {'study', 'research', 'paper', 'thesis', 'analysis', 'method', 
-                     'result', 'conclusion', 'figure', 'table', 'chapter', 'section',
-                     'introduction', 'background', 'review', 'objective', 'purpose',
-                     'data', 'findings', 'based', 'used', 'using'}
-    
-    # Common stop words
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
-                  'this', 'that', 'these', 'those', 'it', 'its', 'has', 'have', 'had'}
-    
-    # Count word frequencies (3+ letter words, excluding stop/exclude words)
-    word_counts = {}
-    for word in words:
-        if (len(word) > 3 and 
-            word not in exclude_words and
-            word not in stop_words and
-            not word.isdigit()):
-            word_counts[word] = word_counts.get(word, 0) + 1
-    
-    # Sort by frequency
-    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
-    
-    topics = []
-    for word, count in sorted_words[:num_topics]:
-        # Capitalize the word for display
-        formatted_word = word.capitalize()
-        topics.append({
-            "topic": formatted_word,
-            "score": min(0.8, count / 10)  # Normalize score
-        })
-    
-    return topics
-
-# ========== EXTRACT TEXT FROM PDF - UPDATED TO 10 PAGES ==========
+# ========== EXTRACT TEXT FROM PDF ==========
 def extract_text_from_pdf(pdf_bytes):
-    """Extract text from PDF bytes - NOW READING 10 PAGES!"""
+    """Extract text from PDF bytes - reading 10 pages"""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
         text = ""
         
-        # UPDATED: Read first 10 pages (was 3)
         pages_to_read = min(10, total_pages)
         print(f"📄 PDF has {total_pages} pages, reading {pages_to_read} pages")
         
@@ -168,42 +163,10 @@ def extract_text_from_pdf(pdf_bytes):
                 print(f"⚠️ Error reading page {i+1}: {page_err}")
                 continue
         
-        # If still no text, try reading as plain text (fallback)
-        if not text.strip():
-            try:
-                text = pdf_bytes.decode('utf-8', errors='ignore')[:5000]
-                print("⚠️ Using fallback text decoding")
-            except:
-                text = ""
-        
         return text.strip()
     except Exception as e:
         print(f"❌ PDF text extraction error: {e}")
         return ""
-
-# Keep original fallback for backward compatibility
-def fallback_topics(text, num_topics=5):
-    """Original fallback - kept for compatibility"""
-    words = text.lower().split()
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-                  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'were', 'be', 'been',
-                  'this', 'that', 'these', 'those', 'it', 'its'}
-    
-    word_counts = {}
-    for word in words:
-        if word not in stop_words and len(word) > 3:
-            word_counts[word] = word_counts.get(word, 0) + 1
-    
-    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
-    
-    topics = []
-    for word, count in sorted_words[:num_topics]:
-        topics.append({
-            "topic": word,
-            "score": count / len(words)
-        })
-    
-    return topics
 
 # ========== ROUTES ==========
 
@@ -213,11 +176,12 @@ def home():
         "message": "Digital Library ML API",
         "status": "running",
         "models_loaded": MODELS_LOADED,
-        "pages_scanned": 10,  # Let users know we now scan 10 pages
+        "topic_extraction": "KeyBERT (BERT-based)" if KEYBERT_LOADED else "TF-IDF (fallback)",
+        "pages_scanned": 10,
         "endpoints": {
             "/predict": "Upload PDF for course prediction",
-            "/predict-with-topics": "Upload PDF for course + topic extraction",
-            "/extract-topics": "Extract topics only",
+            "/predict-with-topics": "Upload PDF for course + topic extraction (KeyBERT)",
+            "/extract-topics": "Extract topics only (KeyBERT)",
             "/predict-text": "Test with text input"
         }
     })
@@ -227,37 +191,44 @@ def health():
     return jsonify({
         "status": "healthy", 
         "models": MODELS_LOADED,
+        "topic_extraction": "keybert" if KEYBERT_LOADED else "tfidf",
         "uptime": time.time() - START_TIME,
         "pages_scanned": 10
     })
 
-# ========== ORIGINAL PREDICT ENDPOINT ==========
+@app.route('/info')
+def info():
+    """Get information about the API configuration"""
+    return jsonify({
+        "name": "DIGILIB ML API",
+        "version": "3.0",
+        "topic_extraction": "KeyBERT (BERT-based)",
+        "model": "all-MiniLM-L6-v2",
+        "pages_scanned": 10,
+        "clusters": CLUSTER_NAMES,
+        "models_loaded": MODELS_LOADED,
+        "keybert_loaded": KEYBERT_LOADED
+    })
+
+# ========== PREDICT ENDPOINT ==========
 @app.route('/predict', methods=['POST'])
 def predict():
-    """Original endpoint - returns only course prediction"""
+    """Returns only course prediction"""
     try:
         if 'file' not in request.files:
-            return jsonify({
-                "success": False, 
-                "error": "No file", 
-                "cluster": 0, 
-                "confidence": 0.5
-            })
+            return jsonify({"success": False, "error": "No file", "cluster": 0, "confidence": 0.5})
         
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
             text = "academic research thesis"
         
-        # Predict using your trained model
         X = vectorizer.transform([text])
         cluster = kmeans.predict(X)[0]
         
-        # Calculate confidence
         closest, distances = pairwise_distances_argmin_min(X, kmeans.cluster_centers_)
         distance = distances[0]
         confidence = max(0.4, min(0.95, 1.0 - (distance / 20.0)))
@@ -273,17 +244,12 @@ def predict():
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "cluster": 0,
-            "confidence": 0.5
-        })
+        return jsonify({"success": False, "error": str(e), "cluster": 0, "confidence": 0.5})
 
-# ========== PREDICT WITH TOPICS ENDPOINT (UPDATED) ==========
+# ========== PREDICT WITH TOPICS (KEYBERT) ==========
 @app.route('/predict-with-topics', methods=['POST'])
 def predict_with_topics():
-    """Returns both course prediction AND extracted topics (now scanning 10 pages)"""
+    """Returns course prediction + KeyBERT extracted topics"""
     try:
         if 'file' not in request.files:
             return jsonify({
@@ -297,17 +263,15 @@ def predict_with_topics():
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Get page count for response
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
         
-        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
             text = "academic research thesis"
         
-        # 1. Course prediction (using your existing model)
+        # 1. Course prediction
         X = vectorizer.transform([text])
         cluster = kmeans.predict(X)[0]
         
@@ -317,8 +281,8 @@ def predict_with_topics():
         
         cluster = max(0, min(5, cluster))
         
-        # 2. Topic extraction
-        topics = extract_topics(text, 8)
+        # 2. Topic extraction using KeyBERT
+        topics = extract_topics_keybert(text, 8)
         
         return jsonify({
             "success": True,
@@ -328,11 +292,12 @@ def predict_with_topics():
             "topics": topics,
             "text_length": len(text),
             "total_pages": total_pages,
-            "pages_scanned": min(10, total_pages)
+            "pages_scanned": min(10, total_pages),
+            "extraction_method": "keybert" if KEYBERT_LOADED else "tfidf"
         })
         
     except Exception as e:
-        print(f"❌ Error in predict-with-topics: {e}")
+        print(f"❌ Error: {e}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -341,10 +306,10 @@ def predict_with_topics():
             "topics": []
         })
 
-# ========== EXTRACT TOPICS ONLY ENDPOINT ==========
+# ========== EXTRACT TOPICS ONLY ==========
 @app.route('/extract-topics', methods=['POST'])
 def extract_topics_only():
-    """Extract topics without course prediction"""
+    """Extract topics using KeyBERT"""
     try:
         if 'file' not in request.files:
             return jsonify({"success": False, "error": "No file", "topics": []})
@@ -352,35 +317,29 @@ def extract_topics_only():
         file = request.files['file']
         pdf_bytes = file.read()
         
-        # Get page count
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
         
-        # Extract text (now using 10 pages)
         text = extract_text_from_pdf(pdf_bytes)
         
         if not text.strip():
             text = "academic research thesis"
         
-        # Extract topics
-        topics = extract_topics(text, 10)
+        topics = extract_topics_keybert(text, 10)
         
         return jsonify({
             "success": True,
             "topics": topics,
             "text_length": len(text),
             "total_pages": total_pages,
-            "pages_scanned": min(10, total_pages)
+            "pages_scanned": min(10, total_pages),
+            "extraction_method": "keybert" if KEYBERT_LOADED else "tfidf"
         })
         
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "topics": []
-        })
+        return jsonify({"success": False, "error": str(e), "topics": []})
 
-# ========== Test with Text Input ==========
+# ========== PREDICT TEXT ==========
 @app.route('/predict-text', methods=['POST'])
 def predict_text():
     """Test endpoint for text input"""
@@ -408,14 +367,15 @@ def predict_text():
         cluster = max(0, min(5, cluster))
         
         # Topic extraction
-        topics = extract_topics(text, 8)
+        topics = extract_topics_keybert(text, 8)
         
         return jsonify({
             "success": True,
             "cluster": int(cluster),
             "confidence": float(confidence),
             "cluster_name": CLUSTER_NAMES[cluster],
-            "topics": topics
+            "topics": topics,
+            "extraction_method": "keybert" if KEYBERT_LOADED else "tfidf"
         })
         
     except Exception as e:
@@ -426,20 +386,6 @@ def predict_text():
             "confidence": 0.5,
             "topics": []
         })
-
-# ========== INFO ENDPOINT ==========
-@app.route('/info')
-def info():
-    """Get information about the API configuration"""
-    return jsonify({
-        "name": "DIGILIB ML API",
-        "version": "2.0",
-        "pages_scanned": 10,
-        "clusters": CLUSTER_NAMES,
-        "models_loaded": MODELS_LOADED,
-        "topic_extraction": "TF-IDF with 3-word phrases",
-        "max_topics": 8
-    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
