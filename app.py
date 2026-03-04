@@ -83,7 +83,7 @@ def extract_topics(text, num_topics=8):
         bigram_scores = bigram_matrix.toarray()[0]
         
         for idx in bigram_scores.argsort()[-num_topics:][::-1]:
-            if bigram_scores[idx] > 0.2:
+            if bigram_scores[idx] > 0.25:
                 topic_sets.append({
                     "topic": ' '.join(w.capitalize() for w in bigram_features[idx].split()),
                     "score": float(bigram_scores[idx]),
